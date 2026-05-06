@@ -1,0 +1,8 @@
+ai-service:
+    build: ./sahtech-ai
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./sahtech-ai/chroma_db:/app/chroma_db  # persist the vector DB
+    env_file:
+      - ./sahtech-ai/.env
