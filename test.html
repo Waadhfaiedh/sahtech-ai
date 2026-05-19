@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sahtech AI — Local Test</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; background: #f5f5f7; }
+  h1 { color: #1d1d1f; }
+  .card { background: white; padding: 24px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); margin-bottom: 16px; }
+  label { display: block; font-weight: 600; margin-bottom: 6px; color: #333; }
+  input, select, textarea { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; box-sizing: border-box; }
+  textarea { min-height: 80px; font-family: inherit; }
+  button { background: #007aff; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 16px; cursor: pointer; margin-top: 12px; }
+  button:disabled { background: #999; cursor: not-allowed; }
+  .response { white-space: pre-wrap; line-height: 1.6; }
+  .meta { font-size: 13px; color: #666; margin-bottom: 12px; padding: 8px 12px; background: #f0f0f0; border-radius: 6px; }
+  .sensitive { background: #fff3cd; border-left: 4px solid #f0ad4e; padding: 10px; margin-bottom: 12px; }
+  .loading { color: #666; font-style: italic; }
+  .error { color: #c00; }
+  [dir="rtl"] { direction: rtl; text-align: right; }
+</style>
+</head>
+<body>
+<h1>🩺 Sahtech AI — Local Test Console</h1>
+
+<div class="card">
+  <label>Role</label>
+  <select id="role">
+    <option value="patient">Patient</option>
+    <option value="specialist">Specialist</option>
+  </select>
+
+  <label style="margin-top: 16px;">Question (any language)</label>
+  <textarea id="message" placeholder="Try: j'ai mal à la tête, what is diabetes, ما هي أعراض ارتفاع ضغط الدم"></textarea>
+
+  <button id="ask" onclick="ask()">Ask</button>
+</div>
+
+<div class="card" id="output" style="display:none;">
+  <div id="meta" class="meta"></div>
+  <div id="answer" class="response"></div>
+  <div id="timing" class="meta" style="margin-top: 12px;"></div>
+</div>
+
+<script>
+const SECRET = "testing-secret-not-for-production";
+
+// Tiny browser-side JWT signer (HS256). Not for production — just dev convenience.
+async function makeJWT(payload) {
+  const enc = new TextEncoder();
+  const b64u = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  const b64uStr = s => btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  const header = b64uStr(JSON.stringify({alg:"HS256",typ:"JWT"}));
+  const body = b64uStr(JSON.stringify(payload));
+  const data = `${header}.${body}`;
+  const key = await crypto.subtle.importKey("raw", enc.encode(SECRET), {name:"HMAC",hash:"SHA-256"}, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(data));
+  return `${data}.${b64u(sig)}`;
+}
+
+async function ask() {
+  const btn = document.getElementById("ask");
+  const role = document.getElementById("role").value;
+  const message = document.getElementById("message").value.trim();
+  if (!message) return;
+
+  btn.disabled = true;
+  btn.textContent = "Thinking… (10-60s)";
+  document.getElementById("output").style.display = "block";
+  document.getElementById("meta").innerHTML = '<span class="loading">Calling AI…</span>';
+  document.getElementById("answer").textContent = "";
+  document.getElementById("timing").textContent = "";
+
+  const token = await makeJWT({role, sub:"test"});
+  const start = performance.now();
+
+  try {
+    const res = await fetch("http://localhost:8001/ask", {
+      method: "POST",
+      headers: {"Content-Type":"application/json", "Authorization":`Bearer ${token}`},
+      body: JSON.stringify({message})
+    });
+    const data = await res.json();
+    const elapsed = ((performance.now() - start) / 1000).toFixed(1);
+
+    if (!res.ok) {
+      document.getElementById("meta").innerHTML = `<span class="error">Error ${res.status}: ${data.detail || "unknown"}</span>`;
+      return;
+    }
+
+    document.getElementById("meta").innerHTML =
+      `<b>Language:</b> ${data.detected_language} &nbsp;|&nbsp; ` +
+      `<b>Medical:</b> ${data.is_medical} &nbsp;|&nbsp; ` +
+      `<b>Sensitive:</b> ${data.is_sensitive}`;
+
+    const ansEl = document.getElementById("answer");
+    ansEl.textContent = data.answer;
+    ansEl.setAttribute("dir", data.detected_language === "ar" ? "rtl" : "ltr");
+
+    document.getElementById("timing").textContent = `⏱ ${elapsed}s`;
+  } catch (e) {
+    document.getElementById("meta").innerHTML = `<span class="error">Network error: ${e.message}</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Ask";
+  }
+}
+</script>
+</body>
+</html>

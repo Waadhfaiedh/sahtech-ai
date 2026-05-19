@@ -1,8 +1,17 @@
-ai-service:
-    build: ./sahtech-ai
+services:
+  ai-service:
+    build: .
+    container_name: sahtech-ai
     ports:
       - "8001:8001"
     volumes:
-      - ./sahtech-ai/chroma_db:/app/chroma_db  # persist the vector DB
-    env_file:
-      - ./sahtech-ai/.env
+      - ./chroma_db:/app/chroma_db
+      - ./documents:/app/documents
+    environment:
+      - JWT_SECRET=testing-secret-not-for-production
+      - JWT_ALGORITHM=HS256
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - OLLAMA_MODEL=gemma2:2b
+      - OLLAMA_CLASSIFIER_MODEL=qwen2.5:1.5b
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
