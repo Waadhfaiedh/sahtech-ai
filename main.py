@@ -231,6 +231,160 @@ async def ask(req: MessageRequest, authorization: str | None = Header(default=No
         is_sensitive=sensitive,
     )
 
+# ==================== MOVEMENT ANALYSIS REPORT ====================
+
+class AnalysisRequest(BaseModel):
+    patient_name: str | None = None
+    body_part: str = "épaule"
+    session_date: str | None = None
+    affected_side: str = "left"        # "left" or "right"
+    metrics: dict = {}                 # { flexion: {left,right,delta_left,delta_right,unit,reference}, ... }
+    movement_quality: dict = {}
+    symmetry_score: float | None = None
+    recovery_score: float | None = None
+    mobility_pct: float | None = None
+    pain_pct: float | None = None
+    pain_scale_eva_change: float | None = None
+    language: str | None = None
+
+class AnalysisResponse(BaseModel):
+    summary: str
+    detailed_interpretation: str
+    correlation: str
+    recommendation: str | None = None
+    metrics_passthrough: dict
+    detected_language: str
+    role: str
+
+ANALYSIS_PROMPT = """You are a medical assistant for Sahtech generating a biomechanical movement analysis report for a shoulder rehabilitation session.
+
+Write your ENTIRE response in {language_name}. {style_instruction}
+
+The patient's AFFECTED shoulder is the {affected_side} side. Below are the MEASURED range-of-motion values for BOTH shoulders (do NOT change these numbers, only interpret them). The healthy side is the patient's own benchmark.
+
+{metrics_block}
+
+Other indicators:
+{indicators_block}
+
+Write a clinical interpretation in exactly THREE sections using these exact markers:
+
+[SUMMARY]
+One or two sentences: the overall headline finding. {tone_instruction}
+
+[INTERPRETATION]
+For the affected ({affected_side}) shoulder, compare each movement to the healthy side and identify which movements show the biggest deficit (as a percentage of the healthy side). Point out the priority movement to rehabilitate. Comment on movement quality. Do NOT invent values.
+
+[CORRELATION]
+Correlate the movement findings with the recovery score and pain indicators. Explain the relationship between mobility and pain.
+
+Output ONLY the three sections with their markers. No preamble."""
+
+PATIENT_ANALYSIS_TONE = {
+    "ar": "استخدم لغة بسيطة ومطمئنة يفهمها المريض غير المختص.",
+    "fr": "Utilise un langage simple et rassurant, compréhensible par un patient non spécialiste.",
+    "en": "Use simple, reassuring language understandable by a non-specialist patient.",
+}
+SPECIALIST_ANALYSIS_TONE = {
+    "ar": "استخدم لغة طبية تقنية دقيقة مناسبة لأخصائي.",
+    "fr": "Utilise un langage médical technique et précis adapté à un spécialiste.",
+    "en": "Use precise, technical medical language suitable for a specialist.",
+}
+ANALYSIS_RECOMMENDATION = {
+    "ar": "بناءً على هذا التحليل، ننصح بمراجعة أخصائي العلاج الطبيعي أو طبيب العظام لمتابعة إعادة تأهيل الكتف.",
+    "fr": "Sur la base de cette analyse, nous recommandons de consulter un kinésithérapeute ou un orthopédiste pour le suivi de la rééducation de l'épaule.",
+    "en": "Based on this analysis, we recommend consulting a physiotherapist or orthopedist for follow-up rehabilitation of the shoulder.",
+}
+
+def build_metrics_block(req: AnalysisRequest) -> str:
+    lines = []
+    for name, m in (req.metrics or {}).items():
+        if not isinstance(m, dict):
+            continue
+        unit = m.get("unit", "")
+        left = m.get("left"); right = m.get("right")
+        ref = m.get("reference")
+        nice = name.replace("_", " ")
+        ref_txt = f", healthy reference {ref}{unit}" if ref is not None else ""
+        lines.append(f"- {nice}: left {left}{unit}, right {right}{unit}{ref_txt}")
+    return "\n".join(lines) if lines else "(no metrics provided)"
+
+def build_indicators_block(req: AnalysisRequest) -> str:
+    lines = []
+    if req.symmetry_score is not None:
+        lines.append(f"- Symmetry score: {req.symmetry_score}%")
+    if req.recovery_score is not None:
+        lines.append(f"- Recovery score: {req.recovery_score}/100")
+    if req.mobility_pct is not None:
+        lines.append(f"- Mobility: {req.mobility_pct}%")
+    if req.pain_pct is not None:
+        lines.append(f"- Pain level: {req.pain_pct}%")
+    if req.pain_scale_eva_change is not None:
+        lines.append(f"- EVA pain scale change: {req.pain_scale_eva_change}")
+    if req.movement_quality:
+        for k, v in req.movement_quality.items():
+            lines.append(f"- {k.replace('_', ' ')}: {v}")
+    return "\n".join(lines) if lines else "(none)"
+
+def parse_sections(text: str) -> dict:
+    sections = {"summary": "", "detailed_interpretation": "", "correlation": ""}
+    mapping = {"[SUMMARY]": "summary", "[INTERPRETATION]": "detailed_interpretation", "[CORRELATION]": "correlation"}
+    current = None
+    for line in text.splitlines():
+        if line.strip() in mapping:
+            current = mapping[line.strip()]
+            continue
+        if current:
+            sections[current] += line + "\n"
+    return {k: v.strip() for k, v in sections.items()}
+
+@app.post("/analyze", response_model=AnalysisResponse)
+async def analyze(req: AnalysisRequest, authorization: str | None = Header(default=None)):
+    role = get_user_role(authorization)
+    lang = req.language if req.language in ("ar", "fr", "en") else "fr"
+
+    tone = (PATIENT_ANALYSIS_TONE if role == "patient" else SPECIALIST_ANALYSIS_TONE)[lang]
+    affected_label = {"left": "left (gauche)", "right": "right (droite)"}.get(req.affected_side, req.affected_side)
+
+    prompt = ANALYSIS_PROMPT.format(
+        language_name=LANGUAGE_NAMES[lang],
+        style_instruction=LANGUAGE_STYLE[lang],
+        affected_side=affected_label,
+        metrics_block=build_metrics_block(req),
+        indicators_block=build_indicators_block(req),
+        tone_instruction=tone,
+    )
+
+    raw = answer_llm.invoke(prompt).strip()
+    parsed = parse_sections(raw)
+    if not any(parsed.values()):
+        parsed["summary"] = raw
+
+    recommendation = ANALYSIS_RECOMMENDATION[lang] if role == "patient" else None
+
+    return AnalysisResponse(
+        summary=parsed["summary"],
+        detailed_interpretation=parsed["detailed_interpretation"],
+        correlation=parsed["correlation"],
+        recommendation=recommendation,
+        metrics_passthrough={
+            "patient_name": req.patient_name,
+            "session_date": req.session_date,
+            "affected_side": req.affected_side,
+            "metrics": req.metrics,
+            "movement_quality": req.movement_quality,
+            "symmetry_score": req.symmetry_score,
+            "recovery_score": req.recovery_score,
+            "mobility_pct": req.mobility_pct,
+            "pain_pct": req.pain_pct,
+            "pain_scale_eva_change": req.pain_scale_eva_change,
+        },
+        detected_language=lang,
+        role=role,
+    )
+
+# ==================== END MOVEMENT ANALYSIS ====================
+
 @app.get("/health")
 def health():
     return {
